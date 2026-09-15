@@ -6,8 +6,10 @@ import httpx
 
 import server
 from server import (
+    add_item_to_collection,
     add_note,
     add_paper_by_doi,
+    add_paper_by_metadata,
     add_tags,
     authorize_zotero_write,
     check_institution_access,
@@ -17,6 +19,7 @@ from server import (
     extract_references,
     get_zotero_item,
     inspect_excel_schema,
+    list_collection_items,
     list_collections,
     list_excel_sheets,
     lookup_doi,
@@ -26,6 +29,7 @@ from server import (
     search_openalex,
     search_zotero,
     preview_references,
+    remove_item_from_collection,
     zotero_status,
 )
 
@@ -60,10 +64,14 @@ def test_tools_registered_and_ping_works() -> None:
         "zotero_status",
         "search_zotero",
         "list_collections",
+        "list_collection_items",
         "get_zotero_item",
         "authorize_zotero_write",
         "create_collection",
+        "add_item_to_collection",
+        "remove_item_from_collection",
         "add_paper_by_doi",
+        "add_paper_by_metadata",
         "add_tags",
         "add_note",
         "list_excel_sheets",
@@ -302,6 +310,39 @@ def test_list_collections_returns_minimal_fields(monkeypatch) -> None:
     }
 
 
+def test_list_collection_items_returns_minimal_bibliographic_fields(monkeypatch) -> None:
+    payload = [
+        {
+            "key": "ZXCVBNM1",
+            "data": {
+                "itemType": "journalArticle",
+                "title": "Collection Article",
+                "date": "2024",
+                "DOI": "10.1234/collection",
+                "collections": ["ABCDEFGH"],
+                "path": "C:/private/file.pdf",
+                "note": "private note body",
+            },
+        }
+    ]
+    captured = {}
+
+    def fake_json(path, params=None):
+        captured.update(path=path, params=params)
+        return payload, None
+
+    monkeypatch.setattr(server, "_zotero_json", fake_json)
+
+    result = list_collection_items("abcdefgh", limit=20)
+
+    assert result["collection_key"] == "ABCDEFGH"
+    assert result["count"] == 1
+    assert result["results"][0]["item_key"] == "ZXCVBNM1"
+    assert "path" not in result["results"][0]
+    assert "note" not in result["results"][0]
+    assert captured["path"].endswith("/collections/ABCDEFGH/items/top")
+
+
 def test_search_zotero_returns_titles_without_private_file_fields(monkeypatch) -> None:
     payload = [
         {
@@ -368,6 +409,7 @@ def test_zotero_tools_are_declared_read_only() -> None:
         "zotero_status",
         "search_zotero",
         "list_collections",
+        "list_collection_items",
         "get_zotero_item",
     ):
         assert tools[name].annotations.read_only_hint is True
@@ -380,13 +422,42 @@ def test_zotero_write_tools_are_non_destructive_and_local() -> None:
     for name in (
         "authorize_zotero_write",
         "create_collection",
+        "add_item_to_collection",
         "add_paper_by_doi",
+        "add_paper_by_metadata",
         "add_tags",
         "add_note",
     ):
         assert tools[name].annotations.read_only_hint is False
         assert tools[name].annotations.destructive_hint is False
         assert tools[name].annotations.open_world_hint is False
+
+
+def test_collection_removal_is_declared_destructive_and_idempotent() -> None:
+    tool = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}[
+        "remove_item_from_collection"
+    ]
+    assert tool.annotations.read_only_hint is False
+    assert tool.annotations.destructive_hint is True
+    assert tool.annotations.idempotent_hint is True
+    assert tool.annotations.open_world_hint is False
+
+
+def test_remove_item_from_collection_delegates(monkeypatch) -> None:
+    monkeypatch.setattr(
+        server.zotero_write,
+        "remove_item_from_collection",
+        lambda item_key, collection_key: {
+            "ok": True,
+            "item_key": item_key,
+            "collection_key": collection_key,
+            "collection_removed": True,
+        },
+    )
+
+    result = remove_item_from_collection("ITEM1234", "COLL1234")
+
+    assert result["collection_removed"] is True
 
 
 def test_excel_tools_are_read_only_and_local() -> None:
@@ -420,6 +491,59 @@ def test_add_paper_by_doi_stops_at_zotero_duplicate(monkeypatch) -> None:
 
     assert result["created"] is False
     assert result["duplicate_found"] is True
+
+
+def test_add_paper_by_doi_links_unique_duplicate_to_collection(monkeypatch) -> None:
+    monkeypatch.setattr(
+        server.zotero_write,
+        "find_paper_by_doi",
+        lambda doi: ([{"item_key": "ABCDEFGH", "title": "Existing", "DOI": doi}], None),
+    )
+    monkeypatch.setattr(
+        server.zotero_write,
+        "add_item_to_collection",
+        lambda item_key, collection_key: {
+            "ok": True,
+            "collection_key": collection_key,
+            "collection_added": True,
+            "collection_already_present": False,
+        },
+    )
+    monkeypatch.setattr(
+        server,
+        "_request_json",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("Crossref must not be called after a Zotero duplicate")
+        ),
+    )
+
+    result = add_paper_by_doi("10.1234/existing", "COLL1234")
+
+    assert result["item_key"] == "ABCDEFGH"
+    assert result["collection_added"] is True
+
+
+def test_add_paper_by_metadata_delegates_confirmed_fields(monkeypatch) -> None:
+    captured = {}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True, "created": True, "item_key": "ABCDEFGH"}
+
+    monkeypatch.setattr(server.zotero_write, "create_paper_from_metadata", fake_create)
+
+    result = add_paper_by_metadata(
+        title="Confirmed",
+        authors=["Ada Lovelace"],
+        year=1997,
+        publication_title="Journal",
+        url="https://example.org/article",
+        collection_key="COLL1234",
+    )
+
+    assert result["created"] is True
+    assert captured["title"] == "Confirmed"
+    assert captured["collection_key"] == "COLL1234"
 
 
 def test_network_diagnosis_redacts_and_classifies_tun(monkeypatch) -> None:

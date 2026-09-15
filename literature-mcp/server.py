@@ -32,7 +32,7 @@ REQUEST_TIMEOUT = httpx.Timeout(20.0, connect=5.0)
 ZOTERO_TIMEOUT = httpx.Timeout(8.0, connect=2.0)
 MAX_RESULTS = 20
 MAX_ZOTERO_RESULTS = 50
-USER_AGENT = "LiteratureMCP/0.5 (scholarly metadata client)"
+USER_AGENT = "LiteratureMCP/0.9 (scholarly metadata client)"
 ZOTERO_READ_ONLY = ToolAnnotations(
     read_only_hint=True,
     destructive_hint=False,
@@ -55,6 +55,12 @@ ZOTERO_WRITE_CREATE = ToolAnnotations(
     read_only_hint=False,
     destructive_hint=False,
     idempotent_hint=False,
+    open_world_hint=False,
+)
+ZOTERO_WRITE_MEMBERSHIP_REMOVE = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=True,
+    idempotent_hint=True,
     open_world_hint=False,
 )
 EXCEL_READ_ONLY = ToolAnnotations(
@@ -806,6 +812,46 @@ def list_collections(
 
 
 @mcp.tool(annotations=ZOTERO_READ_ONLY)
+def list_collection_items(collection_key: str, limit: int = 50) -> dict[str, Any]:
+    """只读列出指定 Collection 的顶层书目条目，不返回附件路径或笔记正文。"""
+
+    key = _valid_zotero_key(collection_key)
+    if not key:
+        return _zotero_error(
+            "invalid_input",
+            "collection_key 必须是 8 位英文字母或数字。",
+            running=None,
+            local_api_enabled=None,
+        )
+    payload, error = _zotero_json(
+        f"{ZOTERO_LIBRARY_PREFIX}/collections/{key}/items/top",
+        {
+            "limit": _bounded_zotero_limit(limit),
+            "sort": "title",
+            "direction": "asc",
+        },
+    )
+    if error:
+        return error
+    if not isinstance(payload, list):
+        return _zotero_error(
+            "invalid_response",
+            "Zotero Local API 返回的 Collection 条目列表格式异常。",
+            running=True,
+            local_api_enabled=True,
+        )
+    return {
+        "ok": True,
+        "source": "Zotero Local API",
+        "collection_key": key,
+        "count": len(payload),
+        "results": [
+            _normalise_zotero_item(item, detailed=False) for item in payload
+        ],
+    }
+
+
+@mcp.tool(annotations=ZOTERO_READ_ONLY)
 def get_zotero_item(item_key: str) -> dict[str, Any]:
     """按 Zotero item key 只读获取书目字段，不返回文件路径或笔记正文。"""
 
@@ -851,6 +897,20 @@ def create_collection(
 
 
 @mcp.tool(annotations=ZOTERO_WRITE_CREATE)
+def add_item_to_collection(item_key: str, collection_key: str) -> dict[str, Any]:
+    """保留现有 Collection 归属，把一个顶层书目条目加入指定 Collection。"""
+
+    return zotero_write.add_item_to_collection(item_key, collection_key)
+
+
+@mcp.tool(annotations=ZOTERO_WRITE_MEMBERSHIP_REMOVE)
+def remove_item_from_collection(item_key: str, collection_key: str) -> dict[str, Any]:
+    """经用户明确确认后，只移除一个 Collection 归属，不删除 Zotero 条目。"""
+
+    return zotero_write.remove_item_from_collection(item_key, collection_key)
+
+
+@mcp.tool(annotations=ZOTERO_WRITE_CREATE)
 def add_paper_by_doi(
     doi: str, collection_key: str | None = None
 ) -> dict[str, Any]:
@@ -868,13 +928,38 @@ def add_paper_by_doi(
     if duplicate_error:
         return duplicate_error
     if duplicates:
-        return {
+        result: dict[str, Any] = {
             "ok": True,
             "source": "Zotero Local API",
             "created": False,
             "duplicate_found": True,
             "duplicates": duplicates,
         }
+        if collection_key:
+            if len(duplicates) != 1 or not duplicates[0].get("item_key"):
+                return {
+                    "ok": False,
+                    "source": "Zotero Local API",
+                    "created": False,
+                    "duplicate_found": True,
+                    "duplicates": duplicates,
+                    "error": {
+                        "code": "ambiguous_duplicate",
+                        "message": "DOI 命中多个 Zotero 条目，未自动加入 Collection。",
+                    },
+                }
+            linked = zotero_write.add_item_to_collection(
+                duplicates[0]["item_key"], collection_key
+            )
+            if not linked.get("ok"):
+                return linked
+            result.update(
+                item_key=duplicates[0]["item_key"],
+                collection_key=linked["collection_key"],
+                collection_added=linked["collection_added"],
+                collection_already_present=linked["collection_already_present"],
+            )
+        return result
     payload, error = _request_json(
         "Crossref", f"{CROSSREF_WORKS_URL}/{quote(normalised_doi, safe='')}"
     )
@@ -885,6 +970,27 @@ def add_paper_by_doi(
         return _error("Crossref", "invalid_response", "Crossref 返回格式异常。")
     return zotero_write.create_paper_from_crossref(
         normalised_doi, message, collection_key
+    )
+
+
+@mcp.tool(annotations=ZOTERO_WRITE_CREATE)
+def add_paper_by_metadata(
+    title: str,
+    authors: list[str] | None = None,
+    year: int | None = None,
+    publication_title: str | None = None,
+    url: str | None = None,
+    collection_key: str | None = None,
+) -> dict[str, Any]:
+    """标题精确查重后，以用户已确认的书目信息创建无 DOI 期刊条目。"""
+
+    return zotero_write.create_paper_from_metadata(
+        title=title,
+        authors=authors,
+        year=year,
+        publication_title=publication_title,
+        url=url,
+        collection_key=collection_key,
     )
 
 

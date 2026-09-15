@@ -130,6 +130,179 @@ def test_401_causes_one_fresh_authorization(monkeypatch) -> None:
     assert writes == ["a" * 32, "b" * 32]
 
 
+def test_add_item_to_collection_preserves_existing_membership(monkeypatch) -> None:
+    responses = iter(
+        [
+            ({"data": {"key": "COLL1234"}}, None),
+            (
+                {
+                    "data": {
+                        "key": "ITEM1234",
+                        "version": 9,
+                        "itemType": "journalArticle",
+                        "collections": ["OLDCLL01"],
+                    }
+                },
+                None,
+            ),
+        ]
+    )
+    monkeypatch.setattr(zotero_write, "_read_json", lambda *args, **kwargs: next(responses))
+    captured = {}
+
+    def fake_write(method, path, body, **kwargs):
+        captured.update(method=method, path=path, body=body, kwargs=kwargs)
+        return _response("PATCH", path, status=204), None
+
+    monkeypatch.setattr(zotero_write, "_authorized_write", fake_write)
+
+    result = zotero_write.add_item_to_collection("ITEM1234", "COLL1234")
+
+    assert result["collection_added"] is True
+    assert captured["method"] == "PATCH"
+    assert captured["body"] == {"collections": ["OLDCLL01", "COLL1234"]}
+    assert captured["kwargs"]["version"] == 9
+
+
+def test_add_item_to_collection_is_idempotent(monkeypatch) -> None:
+    responses = iter(
+        [
+            ({"data": {"key": "COLL1234"}}, None),
+            (
+                {
+                    "data": {
+                        "key": "ITEM1234",
+                        "version": 9,
+                        "itemType": "journalArticle",
+                        "collections": ["COLL1234"],
+                    }
+                },
+                None,
+            ),
+        ]
+    )
+    monkeypatch.setattr(zotero_write, "_read_json", lambda *args, **kwargs: next(responses))
+    monkeypatch.setattr(
+        zotero_write,
+        "_authorized_write",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("existing membership must not write")),
+    )
+
+    result = zotero_write.add_item_to_collection("ITEM1234", "COLL1234")
+
+    assert result["updated"] is False
+    assert result["collection_already_present"] is True
+
+
+def test_remove_item_from_collection_preserves_other_memberships(monkeypatch) -> None:
+    responses = iter(
+        [
+            ({"data": {"key": "COLL1234"}}, None),
+            (
+                {
+                    "data": {
+                        "key": "ITEM1234",
+                        "version": 12,
+                        "itemType": "journalArticle",
+                        "collections": ["OLDCLL01", "COLL1234", "OTHER002"],
+                    }
+                },
+                None,
+            ),
+        ]
+    )
+    monkeypatch.setattr(zotero_write, "_read_json", lambda *args, **kwargs: next(responses))
+    captured = {}
+
+    def fake_write(method, path, body, **kwargs):
+        captured.update(method=method, path=path, body=body, kwargs=kwargs)
+        return _response("PATCH", path, status=204), None
+
+    monkeypatch.setattr(zotero_write, "_authorized_write", fake_write)
+
+    result = zotero_write.remove_item_from_collection("ITEM1234", "COLL1234")
+
+    assert result["collection_removed"] is True
+    assert captured["method"] == "PATCH"
+    assert captured["body"] == {"collections": ["OLDCLL01", "OTHER002"]}
+    assert captured["kwargs"]["version"] == 12
+
+
+def test_remove_item_from_collection_is_idempotent(monkeypatch) -> None:
+    responses = iter(
+        [
+            ({"data": {"key": "COLL1234"}}, None),
+            (
+                {
+                    "data": {
+                        "key": "ITEM1234",
+                        "version": 12,
+                        "itemType": "journalArticle",
+                        "collections": ["OTHER002"],
+                    }
+                },
+                None,
+            ),
+        ]
+    )
+    monkeypatch.setattr(zotero_write, "_read_json", lambda *args, **kwargs: next(responses))
+    monkeypatch.setattr(
+        zotero_write,
+        "_authorized_write",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("absent membership must not write")),
+    )
+
+    result = zotero_write.remove_item_from_collection("ITEM1234", "COLL1234")
+
+    assert result["updated"] is False
+    assert result["collection_already_absent"] is True
+
+
+def test_create_paper_from_metadata_uses_confirmed_fields(monkeypatch) -> None:
+    monkeypatch.setattr(zotero_write, "find_paper_by_title", lambda title: ([], None))
+    monkeypatch.setattr(zotero_write, "_validate_collection_parent", lambda key: (key, None))
+    monkeypatch.setattr(
+        zotero_write,
+        "_template",
+        lambda item_type: (
+            {
+                "itemType": item_type,
+                "title": "",
+                "date": "",
+                "publicationTitle": "",
+                "url": "",
+                "creators": [],
+                "collections": [],
+                "tags": [],
+                "relations": {},
+            },
+            None,
+        ),
+    )
+    captured = {}
+
+    def fake_write(method, path, body, **kwargs):
+        captured.update(method=method, path=path, body=body)
+        return _response("POST", path, payload={"successful": {"0": {"key": "ITEM1234"}}}), None
+
+    monkeypatch.setattr(zotero_write, "_authorized_write", fake_write)
+
+    result = zotero_write.create_paper_from_metadata(
+        title="Confirmed title",
+        authors=["Ada Lovelace"],
+        year=1997,
+        publication_title="Confirmed Journal",
+        url="https://example.org/article",
+        collection_key="COLL1234",
+    )
+
+    assert result["created"] is True
+    payload = captured["body"][0]
+    assert payload["title"] == "Confirmed title"
+    assert payload["creators"] == [{"creatorType": "author", "name": "Ada Lovelace"}]
+    assert payload["collections"] == ["COLL1234"]
+
+
 def test_add_tags_deduplicates_and_preserves_existing(monkeypatch) -> None:
     item = {
         "data": {

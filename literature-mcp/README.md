@@ -55,10 +55,14 @@ PDF 限制 100 MiB，流式写入本版本目录，仅接受 `application/pdf` �
 - `zotero_status()`：检查 Zotero 是否运行以及 Local API 是否启用。
 - `search_zotero(query, limit=10, qmode="titleCreatorYear")`：只读搜索本机 Zotero；`qmode` 也可设为 `everything`。
 - `list_collections(limit=10, top_level_only=False)`：只读列出少量 Collections。
+- `list_collection_items(collection_key, limit=50)`：只读列出指定 Collection 的顶层书目条目，不返回附件路径或笔记正文。
 - `get_zotero_item(item_key)`：按 8 位 item key 读取最小化书目信息。
 - `authorize_zotero_write()`：在 Zotero 桌面端请求有限写入授权；敏感凭据只保存在当前 MCP 进程内存中，不包含在结果中。
 - `create_collection(name, parent_collection=None)`：查重后创建单个 Collection。
-- `add_paper_by_doi(doi, collection_key=None)`：先按 DOI 查重，再使用 Crossref 元数据创建单篇条目；不添加附件。
+- `add_item_to_collection(item_key, collection_key)`：保留条目原有 Collection 归属，把一个顶层书目条目加入指定 Collection；已存在该归属时不重复写入。
+- `remove_item_from_collection(item_key, collection_key)`：仅在用户明确确认后移除一个 Collection 归属；不删除条目、不影响其他 Collection，目标归属已不存在时幂等跳过。
+- `add_paper_by_doi(doi, collection_key=None)`：先按 DOI 查重，再使用 Crossref 元数据创建单篇条目；若 DOI 已唯一命中且指定了 Collection，则把现有条目加入该 Collection，不制造重复条目；不添加附件。
+- `add_paper_by_metadata(title, authors=None, year=None, publication_title=None, url=None, collection_key=None)`：标题精确查重后，以用户已确认的元数据创建无 DOI 期刊条目；多个同名匹配时停止，不自动选择。
 - `add_tags(item_key, tags)`：保留原 tags，仅添加缺少项；禁止操作附件条目。
 - `add_note(parent_item_key, note)`：查重后添加纯文本子 Note；不返回 Note 正文。
 - `list_excel_sheets(excel_path)`：只读列出 Sheet、有效区域和文献候选评分。

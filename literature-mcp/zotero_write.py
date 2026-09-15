@@ -18,7 +18,7 @@ import httpx
 
 BASE_URL = "http://localhost:23119/api/"
 LIBRARY_PREFIX = "users/0"
-USER_AGENT = "LiteratureMCP/0.5 (local Zotero API client)"
+USER_AGENT = "LiteratureMCP/0.9 (local Zotero API client)"
 READ_TIMEOUT = httpx.Timeout(8.0, connect=2.0)
 AUTHORIZE_TIMEOUT = httpx.Timeout(60.0, connect=2.0)
 ALLOWED_WRITE_METHODS = frozenset({"POST", "PATCH"})
@@ -461,6 +461,154 @@ def find_paper_by_doi(doi: str) -> tuple[list[dict[str, Any]], dict[str, Any] | 
     return matches, None
 
 
+def _normalise_title(value: str) -> str:
+    plain = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html.unescape(value))).strip()
+    return plain.casefold()
+
+
+def find_paper_by_title(title: str) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    clean_title = _normalise_name(title)
+    payload, error = _read_json(
+        f"{LIBRARY_PREFIX}/items/top",
+        {"q": clean_title, "qmode": "everything", "itemType": "-attachment"},
+    )
+    if error:
+        return [], error
+    if not isinstance(payload, list):
+        return [], _error("invalid_response", "Zotero 标题查重响应格式异常。")
+    target = _normalise_title(clean_title)
+    matches: list[dict[str, Any]] = []
+    for entry in payload:
+        data = _data(entry)
+        stored = data.get("title")
+        if (
+            data.get("itemType") not in {"attachment", "note"}
+            and isinstance(stored, str)
+            and _normalise_title(stored) == target
+        ):
+            matches.append(
+                {
+                    "item_key": _entry_key(entry),
+                    "title": stored,
+                    "DOI": data.get("DOI") if isinstance(data.get("DOI"), str) else None,
+                    "year": data.get("date") if isinstance(data.get("date"), str) else None,
+                }
+            )
+    return matches, None
+
+
+def add_item_to_collection(item_key: str, collection_key: str) -> dict[str, Any]:
+    key = _valid_key(item_key)
+    collection, error = _validate_collection_parent(collection_key)
+    if not key or error:
+        return error or _error("invalid_input", "item_key 必须是 8 位 Zotero item key。")
+    assert collection is not None
+
+    item, error = _read_json(f"{LIBRARY_PREFIX}/items/{key}")
+    if error:
+        return error
+    data = _data(item)
+    if data.get("itemType") in {"attachment", "note"} or data.get("parentItem"):
+        return _error("child_item_forbidden", "只能把顶层书目条目加入 Collection。")
+    version = data.get("version")
+    if not isinstance(version, int):
+        return _error("invalid_response", "Zotero 条目缺少版本号，未执行写入。")
+    existing = [
+        value.upper()
+        for value in data.get("collections", [])
+        if isinstance(value, str) and _valid_key(value)
+    ]
+    if collection in existing:
+        return {
+            "ok": True,
+            "source": "Zotero Local API",
+            "updated": False,
+            "collection_added": False,
+            "collection_already_present": True,
+            "item_key": key,
+            "collection_key": collection,
+        }
+
+    response, error = _authorized_write(
+        "PATCH",
+        f"{LIBRARY_PREFIX}/items/{key}",
+        {"collections": existing + [collection]},
+        version=version,
+    )
+    if error:
+        return error
+    assert response is not None
+    write_error = _write_error(response)
+    if write_error:
+        return write_error
+    return {
+        "ok": True,
+        "source": "Zotero Local API",
+        "updated": True,
+        "collection_added": True,
+        "collection_already_present": False,
+        "item_key": key,
+        "collection_key": collection,
+    }
+
+
+def remove_item_from_collection(item_key: str, collection_key: str) -> dict[str, Any]:
+    """Remove one Collection membership without deleting or moving the item elsewhere."""
+
+    key = _valid_key(item_key)
+    collection, error = _validate_collection_parent(collection_key)
+    if not key or error:
+        return error or _error("invalid_input", "item_key 必须是 8 位 Zotero item key。")
+    assert collection is not None
+
+    item, error = _read_json(f"{LIBRARY_PREFIX}/items/{key}")
+    if error:
+        return error
+    data = _data(item)
+    if data.get("itemType") in {"attachment", "note"} or data.get("parentItem"):
+        return _error("child_item_forbidden", "只能移除顶层书目条目的 Collection 归属。")
+    version = data.get("version")
+    if not isinstance(version, int):
+        return _error("invalid_response", "Zotero 条目缺少版本号，未执行写入。")
+    existing = [
+        value.upper()
+        for value in data.get("collections", [])
+        if isinstance(value, str) and _valid_key(value)
+    ]
+    if collection not in existing:
+        return {
+            "ok": True,
+            "source": "Zotero Local API",
+            "updated": False,
+            "collection_removed": False,
+            "collection_already_absent": True,
+            "item_key": key,
+            "collection_key": collection,
+        }
+
+    response, error = _authorized_write(
+        "PATCH",
+        f"{LIBRARY_PREFIX}/items/{key}",
+        {"collections": [value for value in existing if value != collection]},
+        version=version,
+    )
+    if error:
+        return error
+    assert response is not None
+    write_error = _write_error(response)
+    if write_error:
+        return write_error
+    return {
+        "ok": True,
+        "source": "Zotero Local API",
+        "updated": True,
+        "collection_removed": True,
+        "collection_already_absent": False,
+        "item_key": key,
+        "collection_key": collection,
+    }
+
+
 def _template(item_type: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     params = {"itemType": item_type}
     if item_type == "attachment":
@@ -507,13 +655,24 @@ def create_paper_from_crossref(
     if error:
         return error
     if matches:
-        return {
+        result = {
             "ok": True,
             "source": "Zotero Local API",
             "created": False,
             "duplicate_found": True,
             "duplicates": matches,
         }
+        if collection_key and len(matches) == 1 and matches[0].get("item_key"):
+            linked = add_item_to_collection(matches[0]["item_key"], collection_key)
+            if not linked.get("ok"):
+                return linked
+            result.update(
+                item_key=matches[0]["item_key"],
+                collection_key=linked["collection_key"],
+                collection_added=linked["collection_added"],
+                collection_already_present=linked["collection_already_present"],
+            )
+        return result
     collection, error = _validate_collection_parent(collection_key)
     if error:
         return error
@@ -578,6 +737,122 @@ def create_paper_from_crossref(
         "item_key": key,
         "title": _plain_text(title),
         "DOI": doi,
+    }
+
+
+def _optional_text(value: str | None, field: str, *, max_length: int) -> tuple[str | None, dict[str, Any] | None]:
+    if value is None:
+        return None, None
+    if not isinstance(value, str):
+        return None, _error("invalid_input", f"{field} 必须是字符串。")
+    clean = _normalise_name(value)
+    if not clean or len(clean) > max_length or any(ord(char) < 32 for char in clean):
+        return None, _error("invalid_input", f"{field} 格式无效。")
+    return clean, None
+
+
+def create_paper_from_metadata(
+    title: str,
+    authors: list[str] | None = None,
+    year: int | None = None,
+    publication_title: str | None = None,
+    url: str | None = None,
+    collection_key: str | None = None,
+) -> dict[str, Any]:
+    clean_title, error = _optional_text(title, "title", max_length=2_048)
+    if error:
+        return error
+    assert clean_title is not None
+
+    cleaned_authors: list[str] = []
+    if authors is not None:
+        if not isinstance(authors, list) or len(authors) > 100:
+            return _error("invalid_input", "authors 必须是最多 100 个姓名组成的列表。")
+        for author in authors:
+            clean_author, error = _optional_text(author, "author", max_length=512)
+            if error:
+                return error
+            assert clean_author is not None
+            cleaned_authors.append(clean_author)
+    if year is not None and (not isinstance(year, int) or isinstance(year, bool) or not 1000 <= year <= 2100):
+        return _error("invalid_input", "year 必须是 1000–2100 之间的整数。")
+    clean_publication, error = _optional_text(publication_title, "publication_title", max_length=1_024)
+    if error:
+        return error
+    clean_url, error = _optional_text(url, "url", max_length=4_096)
+    if error:
+        return error
+    if clean_url:
+        parsed = urlsplit(clean_url)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
+            return _error("invalid_input", "url 必须是不含凭据的 HTTP(S) URL。")
+
+    matches, error = find_paper_by_title(clean_title)
+    if error:
+        return error
+    if len(matches) > 1:
+        return {
+            "ok": False,
+            "source": "Zotero Local API",
+            "duplicate_found": True,
+            "duplicates": matches,
+            "error": {"code": "ambiguous_duplicate", "message": "标题命中多个 Zotero 条目，未自动选择。"},
+        }
+    if matches:
+        result: dict[str, Any] = {
+            "ok": True,
+            "source": "Zotero Local API",
+            "created": False,
+            "duplicate_found": True,
+            "duplicates": matches,
+            "item_key": matches[0].get("item_key"),
+        }
+        if collection_key and matches[0].get("item_key"):
+            linked = add_item_to_collection(matches[0]["item_key"], collection_key)
+            if not linked.get("ok"):
+                return linked
+            result.update(
+                collection_key=linked["collection_key"],
+                collection_added=linked["collection_added"],
+                collection_already_present=linked["collection_already_present"],
+            )
+        return result
+
+    collection, error = _validate_collection_parent(collection_key)
+    if error:
+        return error
+    template, error = _template("journalArticle")
+    if error:
+        return error
+    assert template is not None
+    template["itemType"] = "journalArticle"
+    _set_if_supported(template, "title", clean_title)
+    _set_if_supported(template, "date", str(year) if year else None)
+    _set_if_supported(template, "publicationTitle", clean_publication)
+    _set_if_supported(template, "url", clean_url)
+    template["creators"] = [{"creatorType": "author", "name": author} for author in cleaned_authors]
+    template["collections"] = [collection] if collection else []
+    template["tags"] = []
+    template["relations"] = {}
+
+    response, error = _authorized_write("POST", f"{LIBRARY_PREFIX}/items", [template])
+    if error:
+        return error
+    assert response is not None
+    write_error = _write_error(response)
+    if write_error:
+        return write_error
+    key = _created_key(response)
+    if not key:
+        return _error("invalid_write_response", "文献可能已创建，但 Zotero 未返回可识别的 key。")
+    return {
+        "ok": True,
+        "source": "Zotero Local API",
+        "created": True,
+        "duplicate_found": False,
+        "item_key": key,
+        "title": clean_title,
+        "DOI": None,
     }
 
 

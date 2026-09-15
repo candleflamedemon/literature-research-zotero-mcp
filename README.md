@@ -5,6 +5,8 @@
 - `literature-research/`：Codex Skill（中文名称：Zotero文献库构建助手）。
 - `literature-mcp/`：Python MCP Server（中文名称：ZoteroMCP文献管理服务）。
 
+当前 Literature MCP 版本为 `0.9.0`。本版支持列出 Collection 的顶层书目成员、安全加入归属，以及在用户逐项确认后仅移除指定 Collection 归属；同时支持对已经核验、经用户明确确认且无 DOI 的书目按元数据建条目。
+
 默认工作流为：
 
 > 用户需求 → OpenAlex 发现 → Crossref 校验 → Zotero 去重 → 候选预览 → 用户确认 → Zotero 写入 → OA 全文检查 → 机构权限检查 → 合法 PDF 获取 → 浏览器认证队列 → 获取报告
@@ -12,6 +14,9 @@
 ## 设计边界
 
 - DOI 优先作为唯一标识；写入前必须 Zotero 去重。
+- 已有条目归入新 Collection 时只追加归属，保留原有 Collection；重复归集为幂等操作，不创建重复条目。
+- 精确同步 Collection 时先显示清单差集；移出操作不删除条目、不影响其他 Collection，且必须由用户明确确认。
+- 无 DOI 元数据写入遇到多个同名条目时停止，绝不自动选择。
 - 任何多条写入都先预览并等待用户确认。
 - 全文优先使用 Zotero 已有附件和合法 OA。
 - 机构全文仅在用户确认具有合法权限且检测结果为 `AVAILABLE` 时尝试。
@@ -121,6 +126,8 @@ This repository combines a Codex Skill and a local Python MCP server for researc
 - `literature-research/`: the Codex Skill.
 - `literature-mcp/`: the paired Python MCP server.
 
+The bundled Literature MCP version is `0.9.0`. This release can list top-level Collection members, safely add memberships, and—only after item-level user confirmation—remove one specified membership without deleting the item. It also supports confirmed metadata-based creation for records without a DOI.
+
 The default workflow is:
 
 > User request → OpenAlex discovery → Crossref validation → Zotero deduplication → candidate preview → user confirmation → Zotero write → OA check → institutional-access check → lawful PDF acquisition → browser-authentication queue → final report
@@ -128,6 +135,9 @@ The default workflow is:
 ## Safety model
 
 - DOI is the preferred unique identifier. Zotero is checked before every write.
+- Associating an existing item appends the target Collection while preserving all prior memberships; repeated requests are idempotent and never create a duplicate item.
+- Exact Collection reconciliation previews the set difference first; removal preserves the item and all other Collection memberships and requires explicit confirmation.
+- Metadata-only creation stops when exact-title deduplication is ambiguous.
 - Every multi-item write requires a candidate preview and explicit user confirmation.
 - Existing Zotero attachments and lawful OA sources take priority.
 - Institutional downloads are attempted only after the user confirms lawful access and the access check returns `AVAILABLE`.

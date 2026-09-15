@@ -22,7 +22,7 @@
 - 任务主题、查询范围、生成时间。
 - 候选总数和 A/B/C/D 分组。
 - 用户确认的条目范围与确认时间或轮次。
-- 每条 DOI、标题、元数据来源、去重证据、写入结果、Collection、Tags、Priority。
+- 每条 DOI、标题、元数据来源、去重证据、拟执行/实际动作、写入结果、目标 Collection、加入或移除归属状态（包括幂等结果）、Tags、Priority。
 - 每条 `access_type`、`pdf_status`、合法来源、停止原因、浏览器/手工后续动作。
 - 汇总计数、失败详情和可重试条件。
 - 网络隔离判断：Institutional Client 是否 `trust_env=False`、TUN 风险是否未知或存在。
