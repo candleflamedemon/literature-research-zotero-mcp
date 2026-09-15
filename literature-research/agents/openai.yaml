@@ -1,0 +1,7 @@
+interface:
+  display_name: "Zotero文献库构建助手"
+  short_description: "发现、校验、去重并安全构建 Zotero 专题文献库"
+  default_prompt: "使用 $literature-research 为我的研究主题发现、审核并构建 Zotero 文献库。"
+
+policy:
+  allow_implicit_invocation: true

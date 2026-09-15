@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "literature-mcp"
+version = "0.7.0"
+description = "本地文献检索、Excel 目录解析、Zotero 管理与合规全文解析 MCP Server"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.28,<1",
+    "mcp[cli]==2.2.0",
+    "openpyxl>=3.1,<4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3,<9",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "integration: 调用真实 Crossref/OpenAlex 元数据 API 的联网测试",
+]
+
+[tool.setuptools]
+py-modules = ["server", "network_access", "zotero_write", "excel_catalog", "fulltext_resolver", "elsevier_api"]
